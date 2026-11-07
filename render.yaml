@@ -1,0 +1,14 @@
+# Free preview: no AI keys; data is ephemeral and background work is not durable.
+services:
+  - type: web
+    name: rightplace-ai-preview
+    runtime: docker
+    plan: free
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: MAX_DAILY_AI_CALLS
+        value: "20"
+    healthCheckPath: /api/health

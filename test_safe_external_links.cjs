@@ -1,0 +1,12 @@
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const html=fs.readFileSync('index.html','utf8');
+const match=html.match(/const safeExternalUrl=value=>\{.*?\};const storage=/s);
+assert(match,'Safe external URL helper missing');
+const context={URL};
+vm.runInNewContext(match[0].replace(/;const storage=$/, ';globalThis.safeExternalUrl=safeExternalUrl;'),context);
+const safe=context.safeExternalUrl;
+for(const bad of ['javascript:alert(1)','data:text/html,<h1>bad</h1>','file:///etc/passwd','//example.com','https://','', 'ftp://example.com'])assert.equal(safe(bad),null,bad);
+assert.equal(safe('https://example.com/help?x=1'),'https://example.com/help?x=1');
+assert.equal(safe('http://example.com/'),'http://example.com/');
+assert(html.includes('const safe=safeExternalUrl(f.source_url)'),'Source rendering must use URL guard');
+console.log('Safe external link checks passed (9 URL cases + rendering guard)');

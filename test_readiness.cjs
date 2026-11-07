@@ -1,0 +1,1 @@
+const fs=require('fs'),assert=require('assert');const html=fs.readFileSync('index.html','utf8');assert(html.includes('Preview only · AI not connected'));assert(html.includes('Offline preview · answers unavailable'));assert(html.includes("if(d.mode==='demo'){"));assert(html.includes('return false}return true'));console.log('4 readiness assertions passed');
