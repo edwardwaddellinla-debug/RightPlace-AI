@@ -10,8 +10,8 @@ from public_launch_guard import check_public_launch
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", "8000"))
 INTERVAL = max(900, int(os.environ.get("RESEARCH_INTERVAL_SECONDS", "3600")))
-get(INTERVAL = max(900, int(os.environ.get("INTERVAL", "900"))).get('HOST','127.0.0.1'); PORT=int(os.environ.get('PORT','8000'))
-INTERVAL=max(900,int(os.environ.get('RESEARCH_INTERVAL_SECONDS','3600')))
+
+
 MAX_ROUNDS=max(1,min(8,int(os.environ.get('RESEARCH_MAX_ROUNDS','6'))))
 MODELS={"OpenAI":("OPENAI_API_KEY","OPENAI_MODEL","gpt-4.1-mini"),"Claude":("ANTHROPIC_API_KEY","CLAUDE_MODEL","claude-haiku-4-5"),"Gemini":("GEMINI_API_KEY","GEMINI_MODEL","gemini-2.5-flash")}
 DB_LOCK=threading.RLock()
