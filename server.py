@@ -352,7 +352,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.response(500,{'error':'Server error. Please try again later.'})
     def log_message(self,*args):pass
 
-if __name__=='__main__':
+if if__name__=='__main__':
     check_public_launch()
     setup();threading.Thread(target=worker,daemon=True).start()
     print(f'RightPlace AI server: http://{HOST}:{PORT} | AI keys {sum(bool(os.getenv(v[0])) for v in MODELS.values())}/3 | Search {bool(os.getenv("BRAVE_API_KEY"))}',flush=True)
