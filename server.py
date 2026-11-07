@@ -356,4 +356,4 @@ if__name__=='__main__':
     check_public_launch()
     setup();threading.Thread(target=worker,daemon=True).start()
     print(f'RightPlace AI server: http://{HOST}:{PORT} | AI keys {sum(bool(os.getenv(v[0])) for v in MODELS.values())}/3 | Search {bool(os.getenv("BRAVE_API_KEY"))}',flush=True)
-    ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
+    ((HOST,PORT),Handler).serve_forever()
