@@ -11,7 +11,7 @@ ROOT=Path(__file__).resolve().parent
 DB=Path(os.environ.get('RIGHTPLACE_DB',str(ROOT/'rightplace.db')))
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", "8000"))
-PORT = int(os.environ.get("PORT", "8000")) 
+PORT = int(os.environ.getPORT = int(os.environ.get("PORT", "8000"))
 get(INTERVAL = max(900, int(os.environ.get("INTERVAL", "900"))).get('HOST','127.0.0.1'); PORT=int(os.environ.get('PORT','8000'))
 INTERVAL=max(900,int(os.environ.get('RESEARCH_INTERVAL_SECONDS','3600')))
 MAX_ROUNDS=max(1,min(8,int(os.environ.get('RESEARCH_MAX_ROUNDS','6'))))
