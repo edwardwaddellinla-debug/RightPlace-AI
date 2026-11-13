@@ -7,7 +7,9 @@ from parts_registry import setup_parts, lookup as lookup_parts
 from identifiers import setup_identifiers, lookup_identifier
 from public_launch_guard import check_public_launch
 
-HOST = "0.0.0.0"
+ROOT = Path(__file__).resolve().parent
+DB = Path(os.environ.get("RIGHTPLACE_DB", str(ROOT / "rightplace.db")))
+HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8000"))
 INTERVAL = max(900, int(os.environ.get("RESEARCH_INTERVAL_SECONDS", "3600")))
 
@@ -356,4 +358,4 @@ if __name__ == "__main__":
     check_public_launch()
     setup();threading.Thread(target=worker,daemon=True).start()
     print(f'RightPlace AI server: http://{HOST}:{PORT} | AI keys {sum(bool(os.getenv(v[0])) for v in MODELS.values())}/3 | Search {bool(os.getenv("BRAVE_API_KEY"))}',flush=True)
-    ((HOST,PORT),Handler).serve_forever()
+    ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()

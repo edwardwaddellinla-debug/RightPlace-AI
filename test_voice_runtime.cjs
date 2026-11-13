@@ -1,11 +1,11 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const html=fs.readFileSync(__dirname+'/index.html','utf8');
 const code=html.slice(html.indexOf('const SR=window.SpeechRecognition'),html.indexOf("$('mic').onclick="));
-function setup({secure=true,supported=true}={}){
+function setup({secure=true,supported=true,brokenConstructor=false}={}){
  let clicks=0, timer, instance;
  const elements={};for(const k of ['mic','voiceStatus','question','askBtn'])elements[k]={value:'',textContent:'',attributes:{},classes:new Set(),classList:{toggle(name,on){if(on)this.owner.classes.add(name);else this.owner.classes.delete(name)}},setAttribute(k,v){this.attributes[k]=v},click(){clicks++}};
  for(const v of Object.values(elements))v.classList.owner=v;
- class Speech{constructor(){instance=this}start(){this.onstart()}stop(){this.onend()}abort(){/* simulate browser that never fires onend */}}
+ class Speech{constructor(){if(brokenConstructor)throw Error("Speech unavailable");instance=this}start(){this.onstart()}stop(){this.onend()}abort(){/* simulate browser that never fires onend */}}
  const context={answerInFlight:false,window:{isSecureContext:secure,SpeechRecognition:supported?Speech:undefined},setTimeout(fn){timer=fn;return 1},clearTimeout(){timer=null},alert(){},$:id=>elements[id],console};
  vm.createContext(context);vm.runInContext(code,context);
  return {mic:()=>vm.runInContext("mic('question')",context),get instance(){return instance},get clicks(){return clicks},get timer(){return timer},elements};
@@ -19,4 +19,5 @@ x=setup();x.elements.question.value='Existing draft';x.mic();x.instance.onresult
 x=setup();x.mic();const cancelled=x.instance;x.mic();assert(!x.elements.mic.classes.has('listening'));assert(x.elements.voiceStatus.textContent.includes('cancelled'));assert.equal(x.timer,null);cancelled.onresult({results:[[{transcript:'ignore cancelled'}]]});cancelled.onend();assert.equal(x.clicks,0);assert.equal(x.elements.question.value,'');
 x=setup({secure:false});x.mic();assert(!x.instance);assert(x.elements.voiceStatus.textContent.includes('HTTPS'));
 x=setup({supported:false});x.mic();assert(!x.instance);assert(x.elements.voiceStatus.textContent.includes('unavailable'));
-console.log('PASS: 10 runtime microphone scenarios (permission denial, transcript submission, timeout, HTTPS, unsupported browser)');
+x=setup({brokenConstructor:true});assert.doesNotThrow(()=>x.mic());assert(x.elements.voiceStatus.textContent.includes('phone keyboard'));assert.equal(x.clicks,0);assert(!x.elements.mic.classes.has('listening'));
+console.log('PASS: microphone runtime scenarios, including a speech constructor failure');
