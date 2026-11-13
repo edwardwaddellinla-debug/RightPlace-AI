@@ -169,3 +169,16 @@ The prior Dockerfile omitted three Python modules imported by `server.py`, causi
 On Render choose **New → Blueprint**, connect a GitHub repository containing these files, and select the blueprint. This ZIP itself cannot be selected as a GitHub repository. The free preview will show the interface and health endpoint, **not live AI answers**. Never add paid API keys to this public preview without authentication and external spending controls. The blueprint has not been deployed or tested on Render.
 
 Run `python -m unittest discover -p 'test_*.py'` to validate packaging declarations. This does not replace building and running a Docker image on a real host.
+
+
+## Owner-only pilot
+On the existing Render service, keep the API key server-side and set
+`RIGHTPLACE_PRIVATE_PASSWORD` to a unique random password of 24–128 printable
+ASCII characters without spaces. Do not commit either secret. Open the HTTPS
+site and sign in as `owner`. The health probe is public but only reports
+liveness to unauthenticated requests. All app pages and API calls require the
+owner credentials when billable keys are configured. The old public override
+does not bypass authentication. The pilot pauses background research and
+limits model requests to at most 12 calls per UTC day in local SQLite.
+On ephemeral hosting, a fresh instance can reset that local counter.
+This is a single-owner test, not a public launch.

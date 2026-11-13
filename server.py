@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """RightPlace AI MVP: stdlib HTTP server, optional real model/search APIs, SQLite research jobs."""
-import concurrent.futures, datetime, hashlib, hmac, html, json, os, re, secrets, sqlite3, threading, time, urllib.error, urllib.parse, urllib.request, uuid
+import contextlib, concurrent.futures, datetime, hashlib, hmac, html, json, os, re, secrets, sqlite3, threading, time, urllib.error, urllib.parse, urllib.request, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from parts_registry import setup_parts, lookup as lookup_parts
 from identifiers import setup_identifiers, lookup_identifier
-from public_launch_guard import check_public_launch
+from public_launch_guard import check_public_launch, owner_authorized, private_pilot_configured, private_pilot_required
 
-ROOT = Path(__file__).resolve().parent
-DB = Path(os.environ.get("RIGHTPLACE_DB", str(ROOT / "rightplace.db")))
-HOST = os.environ.get("HOST", "127.0.0.1")
-PORT = int(os.environ.get("PORT", "8000"))
-INTERVAL = max(900, int(os.environ.get("RESEARCH_INTERVAL_SECONDS", "3600")))
-
-
+ROOT=Path(__file__).resolve().parent
+DB=Path(os.environ.get('RIGHTPLACE_DB',str(ROOT/'rightplace.db')))
+HOST=os.environ.get('HOST','127.0.0.1'); PORT=int(os.environ.get('PORT','8000'))
+INTERVAL=max(900,int(os.environ.get('RESEARCH_INTERVAL_SECONDS','3600')))
 MAX_ROUNDS=max(1,min(8,int(os.environ.get('RESEARCH_MAX_ROUNDS','6'))))
 MODELS={"OpenAI":("OPENAI_API_KEY","OPENAI_MODEL","gpt-4.1-mini"),"Claude":("ANTHROPIC_API_KEY","CLAUDE_MODEL","claude-haiku-4-5"),"Gemini":("GEMINI_API_KEY","GEMINI_MODEL","gemini-2.5-flash")}
 DB_LOCK=threading.RLock()
@@ -22,13 +19,24 @@ DB_LOCK=threading.RLock()
 LIMITS={'/api/ask':(12,3600),'/api/benchmark':(4,3600),'/api/jobs':(5,3600)}
 RATE_BUCKETS={}
 RATE_LOCK=threading.Lock()
+# Successful provider replies verified during this server process only.
+VERIFIED_PROVIDERS=set()
+VERIFIED_LOCK=threading.Lock()
 MAX_DAILY_AI_CALLS=max(1,int(os.environ.get('MAX_DAILY_AI_CALLS','100')))
+if private_pilot_required(): MAX_DAILY_AI_CALLS=min(MAX_DAILY_AI_CALLS,12)
 
 def permit_request(route, address):
     max_req, window=LIMITS[route]
     key=(route,address)
     stamp=time.monotonic()
     with RATE_LOCK:
+        # Prune expired client buckets so a long-running public server cannot
+        # retain one dictionary entry forever for every distinct visitor.
+        if len(RATE_BUCKETS)>=1024:
+            for old_key, old_times in list(RATE_BUCKETS.items()):
+                old_window=LIMITS[old_key[0]][1]
+                if not old_times or stamp-old_times[-1]>=old_window:
+                    del RATE_BUCKETS[old_key]
         times=[t for t in RATE_BUCKETS.get(key,[]) if stamp-t<window]
         if len(times)>=max_req:
             RATE_BUCKETS[key]=times
@@ -55,11 +63,17 @@ SYSTEM=("You are RightPlace AI. Answer accurately in clear everyday language, 1-
         "Provide useful how-to steps for ordinary tasks, with proportionate safety warnings; discuss sensitive or illegal topics factually "
         "without giving operational instructions that directly enable serious harm. Disclaimers do not replace safety checks.")
 
+@contextlib.contextmanager
 def connect():
+    """Commit or roll back the transaction and ALWAYS close the SQLite handle."""
     DB.parent.mkdir(parents=True,exist_ok=True)
     con=sqlite3.connect(DB,timeout=15)
-    con.row_factory=sqlite3.Row
-    return con
+    try:
+        con.row_factory=sqlite3.Row
+        with con:
+            yield con
+    finally:
+        con.close()
 
 def setup():
     with connect() as c:
@@ -75,6 +89,17 @@ def check_token(jid, token):
     with connect() as c:
         row=c.execute('SELECT token_hash FROM job_tokens WHERE job_id=?',(jid,)).fetchone()
         return bool(row and hmac.compare_digest(row['token_hash'],token_hash(token)))
+
+def delete_research_job(jid, token):
+    """Delete one owned research job and all its stored dependent records."""
+    with DB_LOCK:
+        if not check_token(jid, token):
+            return False
+        with connect() as c:
+            for table in ('findings', 'runs', 'tried_steps', 'job_tokens'):
+                c.execute(f'DELETE FROM {table} WHERE job_id=?', (jid,))
+            c.execute('DELETE FROM jobs WHERE id=?', (jid,))
+        return True
 
 def normalize_answer(answer):
     return re.sub(r'[^a-z0-9]+',' ', str(answer).lower()).strip()
@@ -95,6 +120,18 @@ def post_json(url,payload,headers=None,timeout=35):
 def get_json(url,headers=None,timeout=18):
     with urllib.request.urlopen(urllib.request.Request(url,headers=headers or {}),timeout=timeout) as r:return json.load(r)
 
+def safe_provider_error(exc):
+    """Return a non-sensitive upstream failure category; never echo URLs, tokens or response bodies."""
+    if isinstance(exc, urllib.error.HTTPError):
+        code=exc.code
+        if code in (401,403):return 'AI provider authentication failed. Check server credentials.'
+        if code==429:return 'AI provider rate limit reached. Please try later.'
+        if code in (400,404):return 'AI provider request or model configuration is invalid.'
+        return 'AI provider returned an HTTP error.'
+    if isinstance(exc, (TimeoutError, urllib.error.URLError)):
+        return 'AI provider connection failed or timed out.'
+    return 'AI provider failed unexpectedly. Please try later.'
+
 def ask_model(name,prompt,system=SYSTEM,timeout=35):
     keyenv,modelenv,default=MODELS[name]; key=os.getenv(keyenv)
     if not key:return {'provider':name,'available':False,'error':'API key not configured'}
@@ -110,9 +147,12 @@ def ask_model(name,prompt,system=SYSTEM,timeout=35):
         else:
             d=post_json('https://generativelanguage.googleapis.com/v1beta/models/'+urllib.parse.quote(model,safe='')+':generateContent',{'systemInstruction':{'parts':[{'text':system}]},'contents':[{'role':'user','parts':[{'text':prompt}]}],'generationConfig':{'maxOutputTokens':650}},{'x-goog-api-key':key},timeout=timeout)
             answer=''.join(p.get('text','') for c in d.get('candidates',[]) for p in c.get('content',{}).get('parts',[]))
-        return {'provider':name,'available':True,'model':model,'answer':answer.strip(),'seconds':round(time.perf_counter()-t,2)} if answer.strip() else {'provider':name,'available':True,'model':model,'error':'Provider returned no answer text','seconds':round(time.perf_counter()-t,2)}
+        if answer.strip():
+            with VERIFIED_LOCK: VERIFIED_PROVIDERS.add(name)
+            return {'provider':name,'available':True,'model':model,'answer':answer.strip(),'seconds':round(time.perf_counter()-t,2)}
+        return {'provider':name,'available':True,'model':model,'error':'Provider returned no answer text','seconds':round(time.perf_counter()-t,2)}
     except Exception as e:
-        return {'provider':name,'available':True,'error':str(e)[:240],'seconds':round(time.perf_counter()-t,2)}
+        return {'provider':name,'available':True,'error':safe_provider_error(e),'seconds':round(time.perf_counter()-t,2)}
 
 def model_batch(question,compare=False,expected=''):
     names=[n for n,v in MODELS.items() if os.getenv(v[0])]
@@ -212,6 +252,7 @@ def research_one(job_id):
     unique=0
     with DB_LOCK:
         with connect() as c:
+            if not c.execute('SELECT 1 FROM jobs WHERE id=? AND stopped=0',(job_id,)).fetchone():return
             for q,x in found:
                 cur=c.execute('INSERT OR IGNORE INTO findings(job_id,created_at,query,source_url,title,snippet) VALUES(?,?,?,?,?,?)',(job_id,now(),q,x['url'],x['title'],x['snippet']))
                 unique+=cur.rowcount
@@ -263,6 +304,25 @@ def get_job(jid):
         return result
 
 class Handler(BaseHTTPRequestHandler):
+    def owner_gate(self, path):
+        # Render health probes do not carry credentials. Return liveness only.
+        if not private_pilot_required():
+            return True
+        if path=='/api/health' and self.command=='GET' and not owner_authorized(self.headers.get_all('Authorization',[])):
+            self.response(200,{'ok':True})
+            return False
+        if self.command=='POST' and self.headers.get('Sec-Fetch-Site','') in ('cross-site','same-site'):
+            self.response(403,{'error':'Open RightPlace AI directly to continue.'})
+            return False
+        if owner_authorized(self.headers.get_all('Authorization',[])):
+            return True
+        self.close_connection=True
+        self.send_response(401)
+        self.send_header('WWW-Authenticate','Basic realm="RightPlace AI private test", charset="UTF-8"')
+        self.send_header('Cache-Control','no-store')
+        self.send_header('Content-Length','0')
+        self.end_headers()
+        return False
     def response(self,status,data):
         body=json.dumps(data,ensure_ascii=False).encode()
         self.send_response(status);self.send_header('X-Content-Type-Options','nosniff');self.send_header('X-Frame-Options','DENY');self.send_header('Referrer-Policy','no-referrer');self.send_header('Content-Type','application/json; charset=utf-8');self.send_header('Cache-Control','no-store');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
@@ -283,9 +343,18 @@ class Handler(BaseHTTPRequestHandler):
         return self.headers.get('X-Job-Token','').strip()
     def do_GET(self):
         p=urllib.parse.urlparse(self.path).path
+        if not self.owner_gate(p):return
         if p in ('/','/index.html'):
             body=(ROOT/'index.html').read_bytes();self.send_response(200);self.send_header('X-Content-Type-Options','nosniff');self.send_header('X-Frame-Options','DENY');self.send_header('Referrer-Policy','no-referrer');self.send_header('Cache-Control','no-store');self.send_header('Content-Type','text/html; charset=utf-8');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body);return
         if p=='/api/health':return self.response(200,{'ok':True,'ai_providers':[n for n,v in MODELS.items() if os.getenv(v[0])],'search_connected':bool(os.getenv('BRAVE_API_KEY')),'research_rounds':MAX_ROUNDS,'interval_seconds':INTERVAL})
+        if p=='/api/readiness':
+            providers=[n for n,v in MODELS.items() if os.getenv(v[0])]
+            public=HOST.strip().lower() not in ('127.0.0.1','localhost','::1')
+            paid_public=public and bool(providers)
+            guarded=not private_pilot_required() or private_pilot_configured()
+            # A successful reply is evidence of connectivity, not answer accuracy or safe billing.
+            with VERIFIED_LOCK: verified=sorted(VERIFIED_PROVIDERS.intersection(providers))
+            return self.response(200,{'server_running':True,'real_ai_configured':bool(providers),'real_ai_verified':bool(verified),'verified_providers_this_process':verified,'public_paid_ai_guard_passed':guarded,'public_paid_ai_safe_to_launch':False if paid_public else None,'voice_device_verified':False,'mode':'configured_unverified' if providers else 'preview_only'})
         if p=='/api/identify':
             args=urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             try:
@@ -307,14 +376,24 @@ class Handler(BaseHTTPRequestHandler):
         self.response(404,{'error':'Not found'})
     def do_POST(self):
         try:
-            p=urllib.parse.urlparse(self.path).path;d=self.read_body()
+            p=urllib.parse.urlparse(self.path).path
+            if not self.owner_gate(p):return
+            if private_pilot_required() and (p=='/api/jobs' or (p.startswith('/api/jobs/') and p.endswith('/resume'))):
+                self.close_connection=True
+                return self.response(409,{'error':'Background research is paused in the private test. Quick Answer is available.'})
+            d=self.read_body()
             if p in LIMITS and not permit_request(p,self.client_address[0]):
                 return self.response(429,{'error':'Too many requests. Please try again later.'})
             if p in ('/api/ask','/api/benchmark'):
                 q=str(d.get('question','')).strip()[:2000]
                 if not q:return self.response(400,{'error':'Enter a question'})
                 expected=str(d.get('expected','')).strip()[:160] if p.endswith('benchmark') else ''
-                result=model_batch(q,compare=p.endswith('benchmark'),expected=expected);return self.response(200,result)
+                # Optional per-request troubleshooting context; never persist it in the database.
+                tried=d.get('already_tried',[])
+                if not isinstance(tried,list):return self.response(400,{'error':'already_tried must be a list'})
+                tried=[str(x).strip()[:240] for x in tried[:8] if isinstance(x,str) and x.strip()]
+                prompt=q if not tried else q+'\n\nPreviously attempted; do not repeat these steps unless safety requires it:\n'+'\n'.join('- '+x for x in tried)
+                result=model_batch(prompt,compare=p.endswith('benchmark'),expected=expected);return self.response(200,result)
             if p=='/api/jobs':
                 q=str(d.get('question','')).strip()[:1200];details=str(d.get('details','')).strip()[:2500]
                 if not q:return self.response(400,{'error':'Enter a question'})
@@ -341,6 +420,11 @@ class Handler(BaseHTTPRequestHandler):
                     with connect() as c:
                         c.execute("UPDATE jobs SET status='queued',stopped=0,next_run=?,updated_at=? WHERE id=? AND round<?",(time.time(),now(),jid,MAX_ROUNDS))
                 return self.response(200,{'status':'queued','note':'Eligible research job queued again.'})
+            if p.endswith('/delete') and p.startswith('/api/jobs/'):
+                jid=p.split('/')[-2]
+                if not delete_research_job(jid,self.read_job_token()):
+                    return self.response(404,{'error':'Job not found or access denied'})
+                return self.response(200,{'deleted':True,'note':'Server-side research and access token deleted.'})
             if p.endswith('/stop') and p.startswith('/api/jobs/'):
                 jid=p.split('/')[-2]
                 if not check_token(jid,self.read_job_token()):return self.response(404,{'error':'Job not found or access denied'})
@@ -354,8 +438,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.response(500,{'error':'Server error. Please try again later.'})
     def log_message(self,*args):pass
 
-if __name__ == "__main__":
+if __name__=='__main__':
     check_public_launch()
-    setup();threading.Thread(target=worker,daemon=True).start()
+    setup()
+    if not private_pilot_required():threading.Thread(target=worker,daemon=True).start()
     print(f'RightPlace AI server: http://{HOST}:{PORT} | AI keys {sum(bool(os.getenv(v[0])) for v in MODELS.values())}/3 | Search {bool(os.getenv("BRAVE_API_KEY"))}',flush=True)
     ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
